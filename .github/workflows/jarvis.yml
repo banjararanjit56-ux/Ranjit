@@ -1,0 +1,226 @@
+name: Build Obito
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+      - name: Create project
+        run: |
+          mkdir -p app/src/main/java/com/obito/app
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.obito.app'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.obito.app'
+              minSdk 26
+              targetSdk 33
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+            <uses-permission android:name="android.permission.SEND_SMS"/>
+            <uses-permission android:name="android.permission.CALL_PHONE"/>
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+            <application android:label="Obito" android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/obito/app/MainActivity.java <<'EOF'
+          package com.obito.app;
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.*;
+          import android.content.pm.*;
+          import android.graphics.*;
+          import android.net.Uri;
+          import android.os.*;
+          import android.speech.*;
+          import android.speech.tts.*;
+          import android.telephony.SmsManager;
+          import android.view.*;
+          import android.widget.*;
+          import java.util.*;
+          import java.util.regex.*;
+
+          public class MainActivity extends Activity implements RecognitionListener {
+            SpeechRecognizer sr; TextToSpeech tts; Hud hud; TextView log; Button btn;
+            boolean on = false; Runnable pending = null;
+            Handler h = new Handler();
+
+            class Hud extends View {
+              boolean active = false; float a = 0; Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              Hud(Context c) { super(c); }
+              protected void onDraw(Canvas c) {
+                float w = getWidth(), hh = getHeight(), cx = w / 2, cy = hh / 2;
+                float R = Math.min(w, hh) / 2 - 30;
+                a += active ? 4 : 1;
+                float pulse = (float) (Math.sin(a / 15) * 0.08 + 1);
+                p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(6); p.setColor(0xFF00E5FF);
+                for (int i = 0; i < 3; i++) {
+                  float r = R - i * 45;
+                  c.drawArc(cx - r, cy - r, cx + r, cy + r, a * (i % 2 == 0 ? 1 : -1) + i * 40, 240, false, p);
+                }
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(active ? 0xAA00E5FF : 0x4400E5FF);
+                c.drawCircle(cx, cy, R * 0.35f * pulse, p);
+                postInvalidateOnAnimation();
+              }
+            }
+
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.SEND_SMS, Manifest.permission.CALL_PHONE}, 1);
+              tts = new TextToSpeech(this, s -> {
+                tts.setLanguage(new Locale("en", "IN"));
+                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                  public void onStart(String id) {}
+                  public void onError(String id) {}
+                  public void onDone(String id) { runOnUiThread(() -> listen()); }
+                });
+              });
+              LinearLayout root = new LinearLayout(this);
+              root.setOrientation(LinearLayout.VERTICAL);
+              root.setBackgroundColor(0xFF020B14);
+              hud = new Hud(this);
+              root.addView(hud, new LinearLayout.LayoutParams(-1, 0, 1f));
+              log = new TextView(this);
+              log.setTextColor(0xFF00E5FF); log.setTextSize(16); log.setGravity(Gravity.CENTER);
+              log.setPadding(20, 20, 20, 20); log.setText("OBITO OFFLINE");
+              root.addView(log);
+              btn = new Button(this);
+              btn.setText("OFF"); btn.setTextColor(0xFF00E5FF); btn.setBackgroundColor(0xFF062A3A);
+              btn.setOnClickListener(v -> toggle());
+              root.addView(btn, new LinearLayout.LayoutParams(-1, 180));
+              setContentView(root);
+            }
+
+            void toggle() {
+              on = !on;
+              btn.setText(on ? "ON" : "OFF");
+              if (on) {
+                if (sr == null) { sr = SpeechRecognizer.createSpeechRecognizer(this); sr.setRecognitionListener(this); }
+                say("Obito online. Boliye.");
+              } else {
+                if (sr != null) sr.cancel();
+                tts.stop(); pending = null; hud.active = false;
+                log.setText("OBITO OFFLINE");
+              }
+            }
+
+            void listen() {
+              if (!on || sr == null) return;
+              hud.active = true;
+              Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+              i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, "free_form");
+              i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
+              sr.startListening(i);
+            }
+
+            void say(String t) {
+              log.setText(t);
+              hud.active = false;
+              if (sr != null) sr.cancel();
+              tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u");
+            }
+
+            void ask(String q, Runnable r) { pending = r; say(q); }
+
+            Intent findApp(String n) {
+              PackageManager pm = getPackageManager();
+              Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+              for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+                String l = ri.loadLabel(pm).toString().toLowerCase();
+                if (!n.isEmpty() && (l.contains(n) || (l.length() > 2 && n.contains(l))))
+                  return pm.getLaunchIntentForPackage(ri.activityInfo.packageName);
+              }
+              return null;
+            }
+
+            void handle(String t) {
+              log.setText("> " + t);
+              if (pending != null) {
+                Runnable p = pending; pending = null;
+                if (t.matches(".*(haan|han|yes|ok|okay|kar do|kar de|theek|sure).*")) {
+                  p.run(); listen();
+                } else say("Theek hai, cancel kar diya.");
+                return;
+              }
+              Matcher m = Pattern.compile("(\\d[\\d ]{8,}\\d)").matcher(t);
+              if (t.matches(".*(message|sms).*") && m.find()) {
+                String num = m.group(1).replace(" ", "");
+                String txt = t.replace(m.group(1), "").replace("message", "").replace("sms", "").trim();
+                ask("Kya main " + num + " ko message bhejun? " + txt, () ->
+                  SmsManager.getDefault().sendTextMessage(num, null, txt, null, null));
+              } else if (t.contains("call") && m.find()) {
+                String num = m.group(1).replace(" ", "");
+                ask("Kya main " + num + " ko call karun?", () ->
+                  startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + num))));
+              } else if (t.matches(".*(open|kholo|khol|chalu).*")) {
+                String name = t.replaceAll("(open|kholo|khol do|khol|chalu karo|chalu|karo|please)", "").trim();
+                Intent li = findApp(name);
+                if (li == null) say(name + " nahi mila.");
+                else ask("Kya main " + name + " kholun?", () -> startActivity(li));
+              } else say("Samajh nahi aaya. Open, call ya message bolo.");
+            }
+
+            public void onResults(Bundle b) {
+              ArrayList<String> r = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+              if (r == null || r.isEmpty()) { listen(); return; }
+              handle(r.get(0).toLowerCase());
+            }
+            public void onError(int e) {
+              if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) return;
+              if (on) h.postDelayed(() -> listen(), 500);
+            }
+            public void onReadyForSpeech(Bundle b) {}
+            public void onBeginningOfSpeech() {}
+            public void onRmsChanged(float v) {}
+            public void onBufferReceived(byte[] b) {}
+            public void onEndOfSpeech() {}
+            public void onPartialResults(Bundle b) {}
+            public void onEvent(int t, Bundle b) {}
+            protected void onDestroy() {
+              super.onDestroy();
+              if (sr != null) sr.destroy();
+              tts.shutdown();
+            }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Obito
+          path: app/build/outputs/apk/debug/app-debug.apk
